@@ -17,12 +17,25 @@ jobs:
   video:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
+      - name: Check the Hugging Face token
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::The secret HF_TOKEN is missing. Add it in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          echo "HF_TOKEN is set."
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Install ffmpeg (fast static build)
+        uses: FedericoCarboni/setup-ffmpeg@v3
 
       - name: Cache the voice model
         uses: actions/cache@v4
@@ -30,10 +43,8 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-indic-parler-tts-v1
 
-      - name: Install tools
+      - name: Install Python tools
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
           pip install -q "torch==2.5.1" "torchaudio==2.5.1" --index-url https://download.pytorch.org/whl/cpu
           pip install -q "numpy<2" git+https://github.com/huggingface/parler-tts.git
           pip install -q soundfile pillow requests playwright
@@ -43,7 +54,6 @@ jobs:
       - name: Make video
         env:
           SPEAKER: ${{ github.event.inputs.speaker }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python scripts/make_video.py --topic "${{ github.event.inputs.topic }}"
 
       - name: Download the video from here (kept 7 days)
