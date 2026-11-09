@@ -1,0 +1,61 @@
+name: Download all videos
+
+# Collects every video that is still available (not older than 7 days)
+# into ONE download, with a folder per video: video.mp4, caption.txt, credits.txt.
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Only names containing this (e.g. Chetan or 05). Leave empty for all."
+        type: string
+        default: ""
+      voice_files:
+        description: "Also include voice.wav files?"
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gather all videos
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ONLY: ${{ inputs.only }}
+          VOICE_FILES: ${{ inputs.voice_files }}
+        run: |
+          set -euo pipefail
+          mkdir -p all-videos
+          # newest first; keep only the latest copy of each name
+          gh api --paginate "repos/$REPO/actions/artifacts?per_page=100" \
+            -q '.artifacts[] | select(.expired == false) | select(.name | startswith("karunaada") or startswith("tulu")) | "\(.id) \(.name)"' > list.txt
+          count=0
+          while read -r id name; do
+            [ -n "$ONLY" ] && [[ "$name" != *"$ONLY"* ]] && continue
+            [ -d "all-videos/$name" ] && continue
+            gh api "repos/$REPO/actions/artifacts/$id/zip" > a.zip
+            unzip -q -o a.zip -d "all-videos/$name"
+            rm -f a.zip
+            [ "$VOICE_FILES" = "true" ] || rm -f "all-videos/$name"/*.wav
+            # give the video a clear file name
+            [ -f "all-videos/$name/video.mp4" ] && mv "all-videos/$name/video.mp4" "all-videos/$name/$name.mp4"
+            echo "added $name"
+            count=$((count + 1))
+          done < list.txt
+          echo "### $count videos collected" >> "$GITHUB_STEP_SUMMARY"
+          ls -R all-videos | head -100
+          [ "$count" -gt 0 ] || { echo "::error::No videos found (videos are kept for 7 days)."; exit 1; }
+
+      - name: One download with all videos
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-videos-${{ github.run_number }}
+          path: all-videos/
+          retention-days: 3
+          compression-level: 0
