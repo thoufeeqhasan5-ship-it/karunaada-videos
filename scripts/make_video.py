@@ -314,6 +314,89 @@ def compose_still(src, dst):
     bg.save(dst, quality=92)
 
 
+# ---------------------------------------------------------------- photo -> "camera shot" (2.5D parallax)
+_depth_model = None
+_depth_cache = {}
+
+
+def depth_map(still, test=False):
+    """How near each pixel is (0 = far, 1 = near), from Depth Anything V2 Small (Apache-2.0). None if unavailable."""
+    import numpy as np
+    key = str(still)
+    if key in _depth_cache:
+        return _depth_cache[key]
+    d = None
+    if test:     # synthetic depth for offline tests: lower and centre of the frame are nearer
+        yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+        d = 0.6 * (yy / H) + 0.4 * np.exp(-(((xx - W / 2) / (W * 0.25)) ** 2 + ((yy - H * 0.55) / (H * 0.2)) ** 2))
+    else:
+        global _depth_model
+        try:
+            from PIL import Image
+            if _depth_model is None:
+                from transformers import pipeline
+                _depth_model = pipeline("depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf", device=-1)
+                log("depth model loaded")
+            out = _depth_model(Image.open(still).convert("RGB"))
+            d = np.asarray(out["depth"].convert("L").resize((W, H)), dtype=np.float32)
+        except Exception as e:
+            log(f"depth unavailable ({str(e)[:160]}), using plain camera moves")
+            _depth_model = False if _depth_model is None else _depth_model
+    if d is not None:
+        import cv2
+        lo, hi = np.percentile(d, 2), np.percentile(d, 98)
+        d = np.clip((d - lo) / max(1e-6, hi - lo), 0, 1)
+        d = cv2.GaussianBlur(d, (0, 0), 9)          # soft edges = no tearing around objects
+    _depth_cache[key] = d
+    return d
+
+
+def parallax_clip(still, seconds, idx, dst, depth):
+    """A smooth 'camera move' over a photo: near things move more than far things."""
+    import numpy as np, cv2
+    img = cv2.imread(str(still))
+    n = max(1, int(round(seconds * FPS)))
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    cx, cy = W / 2.0, H / 2.0
+    D = depth.astype(np.float32)
+    mode = idx % 4
+    proc = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}",
+                             "-r", str(FPS), "-i", "-", "-vf", "format=yuv420p", "-c:v", "libx264", "-preset", "veryfast",
+                             "-crf", "20", str(dst)], stdin=subprocess.PIPE)
+    for f in range(n):
+        p = f / max(1, n - 1)
+        e = p * p * (3 - 2 * p)                       # ease in/out, like a real camera operator
+        px = py = 0.0
+        if mode == 0:      # slow push-in (dolly): near objects grow faster
+            zoom, k = 1.06 + 0.05 * e, 0.06 * e
+        elif mode == 1:    # sideways glide (truck): near objects slide past
+            zoom, k, px = 1.10, 0.0, (-1 + 2 * e) * 0.028 * W
+        elif mode == 2:    # rise (crane up)
+            zoom, k, py = 1.10, 0.0, (1 - 2 * e) * 0.022 * H
+        else:              # slow pull-back
+            zoom, k = 1.11 - 0.05 * e, 0.06 * (1 - e)
+        s = zoom * (1.0 + k * D)
+        mapx = cx + (xx - cx) / s - px * D
+        mapy = cy + (yy - cy) / s - py * D
+        frame = cv2.remap(img, mapx, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        proc.stdin.write(frame.tobytes())
+    proc.stdin.close()
+    if proc.wait() != 0:
+        raise RuntimeError("ffmpeg failed while writing the camera move")
+
+
+def camera_shot(still, seconds, idx, dst, test=False):
+    """Parallax camera move if depth is available, otherwise the classic slow zoom."""
+    try:
+        d = depth_map(still, test)
+        if d is not None:
+            parallax_clip(still, seconds, idx, dst, d)
+            return
+    except Exception as e:
+        log(f"camera move failed ({str(e)[:160]}), using a slow zoom")
+    kenburns(still, seconds, idx, dst)
+
+
 def kenburns(still, seconds, idx, dst):
     n = max(1, int(round(seconds * FPS)))
     zin = idx % 2 == 0
@@ -436,7 +519,7 @@ def main():
                 still = WORK / f"intro_still_{m:02d}.jpg"
                 compose_still(p["path"], still)
                 clip = WORK / f"intro_{m:02d}.mp4"
-                quick_photo(still, seg, m, clip)
+                camera_shot(still, seg, m, clip, a.test)     # fast 3D camera move (slow zoom if no depth)
                 clips.append(clip)
                 credits.append({"text": f"Photo: {p['artist']} · {p['licence']} · Wikimedia Commons" if not a.test else "Photo: test",
                                 "start": round(t_cl, 3), "end": round(t_cl + seg, 3)})
@@ -457,14 +540,16 @@ def main():
         still = WORK / f"still_{j:02d}.jpg"
         compose_still(p["path"], still)
         clip = WORK / f"clip_{j:02d}.mp4"
-        kenburns(still, en - st, j, clip)
+        camera_shot(still, en - st, j, clip, a.test)
         clips.append(clip)
         credits.append({"text": f"Photo: {p['artist']} · {p['licence']} · Wikimedia Commons" if not a.test else "Photo: test",
                         "start": round(st, 3), "end": round(en, 3)})
     # end card background (black) is drawn by the overlay
     lst = WORK / "clips.txt"
     lst.write_text("".join(f"file '{c}'\n" for c in clips))
+    # light film grain + vignette: reads as filmed footage rather than a slideshow
     run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst, "-r", FPS,
+         "-vf", "noise=c0s=7:c0f=t+u,vignette=angle=PI/5",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p", WORK / "photos.mp4"])
 
     # 4. overlay timeline
