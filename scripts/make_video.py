@@ -169,6 +169,112 @@ def test_photos(shots, outdir):
     return got
 
 
+# ---------------------------------------------------------------- moving clips for the opening
+INTRO_MAX, INTRO_CLIP = 3.6, 0.9      # seconds of quick moving shots at the start, ~0.9 s each
+
+
+def commons_videos(query, n=15):
+    """Free-licence videos from Wikimedia Commons, using a small transcoded copy."""
+    import requests
+    r = requests.get("https://commons.wikimedia.org/w/api.php", headers=UA, timeout=60, params={
+        "action": "query", "format": "json", "generator": "search", "gsrsearch": f"{query} filetype:video",
+        "gsrnamespace": 6, "gsrlimit": n, "prop": "videoinfo", "viprop": "url|size|mime|extmetadata|derivatives"})
+    r.raise_for_status()
+    pages = (r.json().get("query") or {}).get("pages") or {}
+    out = []
+    for p in sorted(pages.values(), key=lambda x: x.get("index", 99)):
+        vi = (p.get("videoinfo") or [{}])[0]
+        md = vi.get("extmetadata") or {}
+        lic = re.sub(r"<[^>]+>", "", (md.get("LicenseShortName") or {}).get("value", "")).strip()
+        artist = re.sub(r"<[^>]+>", "", (md.get("Artist") or {}).get("value", "")).strip()
+        if not OK_LICENCE.match(lic) or float(vi.get("duration") or 0) < 3:
+            continue
+        ders = [d for d in (vi.get("derivatives") or []) if "webm" in d.get("type", "") and 360 <= int(d.get("height") or 0) <= 1080]
+        ders.sort(key=lambda d: abs(int(d.get("height") or 0) - 720))
+        url = ders[0]["src"] if ders else (vi.get("url") if (vi.get("size") or 0) < 80_000_000 else None)
+        if not url:
+            continue
+        out.append({"title": p["title"], "url": url, "licence": lic, "artist": re.sub(r"\s+", " ", artist)[:60] or "Unknown",
+                    "page": vi.get("descriptionurl", ""), "duration": float(vi.get("duration") or 0)})
+    return out
+
+
+def pixabay_videos(query, n=8):
+    """Pixabay stock clips (free, no attribution needed). Only if the secret PIXABAY_KEY is set."""
+    import requests
+    key = os.getenv("PIXABAY_KEY", "").strip()
+    if not key:
+        return []
+    r = requests.get("https://pixabay.com/api/videos/", timeout=60,
+                     params={"key": key, "q": query[:100], "per_page": n, "safesearch": "true"})
+    r.raise_for_status()
+    out = []
+    for h in r.json().get("hits", []):
+        v = (h.get("videos") or {}).get("medium") or (h.get("videos") or {}).get("small") or {}
+        if v.get("url") and (h.get("duration") or 0) >= 3:
+            out.append({"title": f"Pixabay video {h.get('id')}", "url": v["url"], "licence": "Pixabay Content License",
+                        "artist": h.get("user") or "Pixabay", "page": h.get("pageURL", ""), "duration": float(h.get("duration") or 0),
+                        "pixabay": True})
+    return out
+
+
+def motion_queries(topic):
+    """Topic can set "motion": [...]; otherwise use its photo searches and English title."""
+    if topic.get("motion"):
+        return list(topic["motion"])
+    qs = [topic.get("title_en", "")] + [q for s in topic.get("shots", []) for q in s.get("q", [])[:1]]
+    return [q for q in dict.fromkeys(q.strip() for q in qs) if q]
+
+
+def fetch_motion(topic, outdir, want=4):
+    import requests
+    found, seen = [], set()
+    queries = motion_queries(topic)
+    sources = [(commons_videos, q) for q in queries] + \
+              [(pixabay_videos, q) for q in queries] + [(pixabay_videos, f"{topic.get('title_en', '')} India")]
+    for fn, q in sources:
+        if len(found) >= want:
+            break
+        try:
+            for c in fn(q):
+                if c["url"] in seen:
+                    continue
+                seen.add(c["url"])
+                path = outdir / f"motion_src_{len(found):02d}{Path(c['url'].split('?')[0]).suffix or '.mp4'}"
+                r = requests.get(c["url"], headers=UA, timeout=180); r.raise_for_status()
+                path.write_bytes(r.content)
+                c["path"] = path
+                found.append(c)
+                log(f"motion clip {len(found)}: {c['title']} ({c['licence']}, {c['artist']}) from '{q}'")
+                if len(found) >= want:
+                    break
+        except Exception as e:
+            log(f"motion search failed '{q}': {str(e)[:150]}")
+    return found
+
+
+def test_motion(outdir, want=4):
+    got = []
+    for k in range(want):
+        p = outdir / f"motion_src_{k:02d}.mp4"
+        run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", f"testsrc2=size=1280x720:rate=30:d=6",
+             "-vf", f"hue=h={k * 70}", "-c:v", "libx264", "-preset", "veryfast", p])
+        got.append({"path": p, "title": f"Test clip {k}", "licence": "CC BY 4.0", "artist": "Test", "page": "", "duration": 6})
+    return got
+
+
+def motion_clip(src, seconds, idx, dst):
+    """A short moving shot: random start, cropped to 9:16, a slight push-in, a little punchier colour."""
+    total = float(src.get("duration") or 0) or dur(src["path"])
+    start = max(0.0, min(total - seconds - 0.2, 1.0 + random.Random(idx).random() * max(0.0, total - seconds - 2.0)))
+    n = max(1, int(round(seconds * FPS)))
+    run(["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-i", src["path"], "-t", f"{seconds + 0.1:.2f}", "-an",
+         "-vf", f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps={FPS},"
+                f"scale=w='trunc({W}*(1+0.06*t/{seconds:.2f})/2)*2':h=-2:eval=frame,crop={W}:{H},"
+                "eq=contrast=1.08:saturation=1.12,format=yuv420p",
+         "-frames:v", n, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", FPS, dst])
+
+
 def compose_still(src, dst):
     """Photo fitted over a blurred copy of itself, 1080x1920."""
     from PIL import Image, ImageFilter, ImageEnhance
@@ -275,8 +381,36 @@ def main():
         shot_start.setdefault(ph.get("shot", 0), segs[i][0] if i else 0.0)
     order = sorted(shot_start.items(), key=lambda kv: kv[1])
     clips, credits = [], []
+
+    # 3a. opening: 3-4 quick moving shots before the first photo (if any free clips are found)
+    motion = test_motion(WORK) if a.test else fetch_motion(topic, WORK)
+    first_len = (order[1][1] if len(order) > 1 else end_start) - order[0][1]
+    intro = 0.0
+    if len(motion) >= 2:
+        intro = min(INTRO_MAX, first_len if first_len - INTRO_MAX < 0.8 else INTRO_MAX)
+        n_cl = max(2, min(len(motion), round(intro / INTRO_CLIP)))
+        t_cl = 0.0
+        for m in range(n_cl):
+            seg = round(intro / n_cl, 3) if m < n_cl - 1 else round(intro - t_cl, 3)
+            clip = WORK / f"intro_{m:02d}.mp4"
+            motion_clip(motion[m], seg, m, clip)
+            clips.append(clip)
+            src = motion[m]
+            credits.append({"text": ("Video: Pixabay" if src.get("pixabay") else
+                                     f"Video: {src['artist']} · {src['licence']} · Wikimedia Commons") if not a.test else "Video: test",
+                            "start": round(t_cl, 3), "end": round(t_cl + seg, 3)})
+            t_cl += seg
+        log(f"opening: {n_cl} moving shots, {intro:.1f}s")
+    else:
+        log("opening: no free moving clips found, starting with the photo")
+        motion = []
+
     for j, (k, st) in enumerate(order):
         en = order[j + 1][1] if j + 1 < len(order) else end_start
+        if j == 0 and intro:
+            st = intro
+            if en - st < 0.3:           # the whole first slot went to the moving shots
+                continue
         p = photos[k] if k < len(photos) else None
         if p is None:
             p = next((x for x in photos if x), None)
@@ -290,7 +424,8 @@ def main():
     # end card background (black) is drawn by the overlay
     lst = WORK / "clips.txt"
     lst.write_text("".join(f"file '{c}'\n" for c in clips))
-    run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", WORK / "photos.mp4"])
+    run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst, "-r", FPS,
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p", WORK / "photos.mp4"])
 
     # 4. overlay timeline
     cards, caps = [], []
@@ -322,7 +457,8 @@ def main():
 
     (OUT / "caption.txt").write_text(topic.get("caption", ""), encoding="utf-8")
     (OUT / "credits.txt").write_text("\n".join(
-        f"{p['title']} — {p['artist']} — {p['licence']} — {p['page']}" for p in photos if p), encoding="utf-8")
+        f"{p['title']} — {p['artist']} — {p['licence']} — {p['page']}" for p in list(motion) + [x for x in photos if x]),
+        encoding="utf-8")
     log(f"done: out/video.mp4 ({total_dur:.1f}s), voice: {'own recording' if own else a.speaker}")
 
 
