@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 60
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      PIXABAY_KEY: ${{ secrets.PIXABAY_KEY }}   # optional: extra moving clips for the opening
     steps:
       - name: Check the Hugging Face token
         run: |
