@@ -49,7 +49,7 @@ jobs:
           pip install -q "torch==2.5.1" "torchaudio==2.5.1" --index-url https://download.pytorch.org/whl/cpu
           pip install -q "numpy<2" git+https://github.com/huggingface/parler-tts.git
           pip install -q "sentencepiece==0.2.0"
-          pip install -q soundfile pillow requests playwright
+          pip install -q soundfile pillow requests playwright "opencv-python-headless==4.10.0.84"
           python -m playwright install --with-deps chromium
           python -c "import torch, torchaudio; print('torch', torch.__version__, 'torchaudio', torchaudio.__version__)"
 
