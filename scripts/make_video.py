@@ -275,6 +275,24 @@ def motion_clip(src, seconds, idx, dst):
          "-frames:v", n, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", FPS, dst])
 
 
+def quick_photo(still, seconds, idx, dst):
+    """Backup opening shot when no video clips exist: a fast punch-in or sweep across a real photo."""
+    n = max(1, int(round(seconds * FPS)))
+    mode = idx % 4
+    if mode == 0:      # fast punch-in to the centre
+        z, x, y = f"1.0+0.30*on/{n}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+    elif mode == 1:    # sweep left -> right
+        z, x, y = "1.25", f"(iw-iw/zoom)*on/{n}", "ih/2-(ih/zoom/2)"
+    elif mode == 2:    # pull back out
+        z, x, y = f"1.32-0.30*on/{n}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+    else:              # tilt up
+        z, x, y = "1.25", "iw/2-(iw/zoom/2)", f"(ih-ih/zoom)*(1-on/{n})"
+    run(["ffmpeg", "-y", "-v", "error", "-loop", "1", "-i", still, "-vf",
+         f"scale={W * 2}:{H * 2},zoompan=z='{z}':x='{x}':y='{y}':d={n}:s={W}x{H}:fps={FPS},"
+         "eq=contrast=1.06:saturation=1.1,format=yuv420p",
+         "-frames:v", n, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", dst])
+
+
 def compose_still(src, dst):
     """Photo fitted over a blurred copy of itself, 1080x1920."""
     from PIL import Image, ImageFilter, ImageEnhance
@@ -383,7 +401,7 @@ def main():
     clips, credits = [], []
 
     # 3a. opening: 3-4 quick moving shots before the first photo (if any free clips are found)
-    motion = test_motion(WORK) if a.test else fetch_motion(topic, WORK)
+    motion = (test_motion(WORK) if os.getenv("TEST_CLIPS") else []) if a.test else fetch_motion(topic, WORK)
     first_len = (order[1][1] if len(order) > 1 else end_start) - order[0][1]
     intro = 0.0
     if len(motion) >= 2:
@@ -402,8 +420,30 @@ def main():
             t_cl += seg
         log(f"opening: {n_cl} moving shots, {intro:.1f}s")
     else:
-        log("opening: no free moving clips found, starting with the photo")
+        # no video clips: fast moves across the real photos instead, so the start is never static
         motion = []
+        pics = []
+        for p in photos:                      # unique photos, in shot order
+            if p and all(p is not q for q in pics):
+                pics.append(p)
+        if pics:
+            intro = min(INTRO_MAX, first_len if first_len - INTRO_MAX < 0.8 else INTRO_MAX)
+            n_cl = max(3, round(intro / INTRO_CLIP))
+            t_cl = 0.0
+            for m in range(n_cl):
+                p = pics[m % len(pics)]
+                seg = round(intro / n_cl, 3) if m < n_cl - 1 else round(intro - t_cl, 3)
+                still = WORK / f"intro_still_{m:02d}.jpg"
+                compose_still(p["path"], still)
+                clip = WORK / f"intro_{m:02d}.mp4"
+                quick_photo(still, seg, m, clip)
+                clips.append(clip)
+                credits.append({"text": f"Photo: {p['artist']} · {p['licence']} · Wikimedia Commons" if not a.test else "Photo: test",
+                                "start": round(t_cl, 3), "end": round(t_cl + seg, 3)})
+                t_cl += seg
+            log(f"opening: no video clips found - {n_cl} fast photo moves, {intro:.1f}s")
+        else:
+            log("opening: no free moving clips found, starting with the photo")
 
     for j, (k, st) in enumerate(order):
         en = order[j + 1][1] if j + 1 < len(order) else end_start
