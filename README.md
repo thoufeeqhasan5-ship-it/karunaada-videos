@@ -27,15 +27,18 @@ When it finishes, open the run and download the zip under **Artifacts**:
   and run again; it replaces the AI voice automatically.
 
 ## Photos that move like camera shots
-Each photo becomes a short "camera move" (push-in, sideways glide, rise or pull-back) with 3D depth:
-the free Depth Anything V2 Small model (Apache-2.0) finds what is near and far, and near objects move
-more than the background, like real filming. Light film grain and a vignette are added.
-If the depth model can't load, the classic slow zoom is used instead.
+Each photo fills the whole screen and a "camera" travels across it: wide photos are panned across their
+full width; others get a push-in, rise, drift or pull-back. 3D depth from the free Depth Anything V2 Small
+model (Apache-2.0) makes near objects move more than the background, like real filming.
+Light film grain and a vignette are added. If anything fails, the classic slow zoom is used instead.
 
-## Opening
-Every video opens with 3-4 fast 3D camera moves (~0.9 s each) over the topic's real photos.
-Stock video clips (Wikimedia / Pixabay) are switched off because they rarely show the actual place;
-to try them again, add `USE_STOCK_CLIPS: "1"` to the env of `.github/workflows/make-video.yml`.
+## Opening hook
+For the first ~3 seconds the hook line appears big in the middle with "ಕೊನೆಯವರೆಗೂ ನೋಡಿ" under it,
+over the first 3D camera shot, while the narrator says the opening line.
+- Hook text = the first phrase's `card` (or set `"hook": "..."` in the topic file).
+- Change or remove the small line with `"hook_sub": "..."` (`""` = none).
+Every photo, start to end, is a smooth 3D camera move. Stock clips and the fast opening montage are off
+(`USE_STOCK_CLIPS: "1"` / `FAST_OPENING: "1"` in the workflow env turn them back on).
 
 ## Adding a topic
 Copy `topics/05.json` to a new number and edit:
