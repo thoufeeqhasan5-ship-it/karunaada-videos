@@ -26,6 +26,19 @@ When it finishes, open the run and download the zip under **Artifacts**:
 - Want a human voice for a video? Put a recording at `voice/05.m4a` (same number as the topic)
   and run again; it replaces the AI voice automatically.
 
+## Photos that move like camera shots
+Each photo becomes a short "camera move" (push-in, sideways glide, rise or pull-back) with 3D depth:
+the free Depth Anything V2 Small model (Apache-2.0) finds what is near and far, and near objects move
+more than the background, like real filming. Light film grain and a vignette are added.
+If the depth model can't load, the classic slow zoom is used instead.
+
+## Moving clips at the start
+Every video opens with 3-4 quick moving shots (~0.9 s each) before the photos:
+free-licence videos of the place from Wikimedia Commons (credited on screen), and — if the secret
+`PIXABAY_KEY` is set (free key from pixabay.com/api/docs) — Pixabay stock clips as backup.
+To choose the search words, add `"motion": ["Badami cave temples drone", "Badami"]` to a topic file.
+If nothing is found the video simply starts with the photo.
+
 ## Adding a topic
 Copy `topics/05.json` to a new number and edit:
 - `phrases` – one sentence each, in speaking order. `text` is shown as captions; optional
