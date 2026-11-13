@@ -32,12 +32,10 @@ the free Depth Anything V2 Small model (Apache-2.0) finds what is near and far, 
 more than the background, like real filming. Light film grain and a vignette are added.
 If the depth model can't load, the classic slow zoom is used instead.
 
-## Moving clips at the start
-Every video opens with 3-4 quick moving shots (~0.9 s each) before the photos:
-free-licence videos of the place from Wikimedia Commons (credited on screen), and — if the secret
-`PIXABAY_KEY` is set (free key from pixabay.com/api/docs) — Pixabay stock clips as backup.
-To choose the search words, add `"motion": ["Badami cave temples drone", "Badami"]` to a topic file.
-If nothing is found the video simply starts with the photo.
+## Opening
+Every video opens with 3-4 fast 3D camera moves (~0.9 s each) over the topic's real photos.
+Stock video clips (Wikimedia / Pixabay) are switched off because they rarely show the actual place;
+to try them again, add `USE_STOCK_CLIPS: "1"` to the env of `.github/workflows/make-video.yml`.
 
 ## Adding a topic
 Copy `topics/05.json` to a new number and edit:
