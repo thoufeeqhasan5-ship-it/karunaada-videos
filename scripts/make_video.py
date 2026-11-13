@@ -484,7 +484,12 @@ def main():
     clips, credits = [], []
 
     # 3a. opening: 3-4 quick moving shots before the first photo (if any free clips are found)
-    motion = (test_motion(WORK) if os.getenv("TEST_CLIPS") else []) if a.test else fetch_motion(topic, WORK)
+    # Stock video clips are OFF: they rarely show the actual place. Every shot is a real photo of it,
+    # turned into a 3D camera move. (Set USE_STOCK_CLIPS=1 to try Wikimedia/Pixabay clips again.)
+    if a.test:
+        motion = test_motion(WORK) if os.getenv("TEST_CLIPS") else []
+    else:
+        motion = fetch_motion(topic, WORK) if os.getenv("USE_STOCK_CLIPS") == "1" else []
     first_len = (order[1][1] if len(order) > 1 else end_start) - order[0][1]
     intro = 0.0
     if len(motion) >= 2:
@@ -524,7 +529,7 @@ def main():
                 credits.append({"text": f"Photo: {p['artist']} · {p['licence']} · Wikimedia Commons" if not a.test else "Photo: test",
                                 "start": round(t_cl, 3), "end": round(t_cl + seg, 3)})
                 t_cl += seg
-            log(f"opening: no video clips found - {n_cl} fast photo moves, {intro:.1f}s")
+            log(f"opening: {n_cl} fast 3D camera moves over the real photos, {intro:.1f}s")
         else:
             log("opening: no free moving clips found, starting with the photo")
 
