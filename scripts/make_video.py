@@ -492,6 +492,7 @@ def main():
         motion = fetch_motion(topic, WORK) if os.getenv("USE_STOCK_CLIPS") == "1" else []
     first_len = (order[1][1] if len(order) > 1 else end_start) - order[0][1]
     intro = 0.0
+    fast_opening = os.getenv("FAST_OPENING") == "1"   # off: open straight on the first 3D camera shot
     if len(motion) >= 2:
         intro = min(INTRO_MAX, first_len if first_len - INTRO_MAX < 0.8 else INTRO_MAX)
         n_cl = max(2, min(len(motion), round(intro / INTRO_CLIP)))
@@ -507,8 +508,8 @@ def main():
                             "start": round(t_cl, 3), "end": round(t_cl + seg, 3)})
             t_cl += seg
         log(f"opening: {n_cl} moving shots, {intro:.1f}s")
-    else:
-        # no video clips: fast moves across the real photos instead, so the start is never static
+    elif fast_opening:
+        # optional: fast moves across the real photos
         motion = []
         pics = []
         for p in photos:                      # unique photos, in shot order
@@ -531,7 +532,10 @@ def main():
                 t_cl += seg
             log(f"opening: {n_cl} fast 3D camera moves over the real photos, {intro:.1f}s")
         else:
-            log("opening: no free moving clips found, starting with the photo")
+            log("opening: no photos for fast moves, starting with the photo")
+    else:
+        motion = []
+        log("opening: hook screen over the first 3D camera shot")
 
     for j, (k, st) in enumerate(order):
         en = order[j + 1][1] if j + 1 < len(order) else end_start
@@ -564,7 +568,13 @@ def main():
         if ph.get("card"):
             cards.append({"text": ph["card"], "start": round(st, 3), "end": round(min(en + 0.6, end_start), 3)})
         caps += caption_chunks(ph["text"], st, en)
-    data = {"endStart": round(end_start, 3), "cards": cards, "caps": caps, "credits": credits}
+    # hook screen: the opening line, big in the middle, for the first ~3 s
+    first_end = min(order[1][1] if len(order) > 1 else end_start, 3.2)
+    hook_text = topic.get("hook") or topic["phrases"][0].get("card") or topic.get("title_kn", "")
+    hook = {"text": hook_text, "sub": topic.get("hook_sub", "ಕೊನೆಯವರೆಗೂ ನೋಡಿ"),
+            "start": 0.0, "end": round(max(2.2, first_end), 3)}
+    cards = [c for c in cards if c["start"] >= hook["end"] - 0.05]   # no small card under the hook
+    data = {"endStart": round(end_start, 3), "cards": cards, "caps": caps, "credits": credits, "hook": hook}
     frames = WORK / "frames"; frames.mkdir()
     render_overlay(data, total_dur, frames)
 

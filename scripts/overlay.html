@@ -25,6 +25,14 @@
                font-weight: 800; font-size: 88px; line-height: 1.15; text-align: center; max-width: 900px;
                box-shadow: 0 12px 40px rgba(0,0,0,.45); border-bottom: 10px solid #D7261E; }
 
+  #hook { position: absolute; left: 60px; right: 60px; top: 640px; display: flex; flex-direction: column;
+          align-items: center; opacity: 0; }
+  #hookText { padding: 22px 46px 12px; background: #FFCC00; color: #140806; border-radius: 22px;
+              font-weight: 800; font-size: 112px; line-height: 1.12; text-align: center; max-width: 940px;
+              box-shadow: 0 18px 60px rgba(0,0,0,.6); border-bottom: 12px solid #D7261E; }
+  #hookSub { margin-top: 26px; font-weight: 800; font-size: 52px; color: #fff; padding: 6px 30px 0;
+             background: rgba(20,8,6,.78); border-radius: 999px; border: 3px solid #FFCC00; }
+
   #cap { position: absolute; left: 70px; right: 70px; top: 1330px; text-align: center;
          font-weight: 800; font-size: 72px; line-height: 1.25; color: #fff;
          -webkit-text-stroke: 3px #140806; paint-order: stroke fill;
@@ -48,6 +56,7 @@
     <div id="progress"></div>
     <div id="brand"><img src="../assets/logo-mark.svg" alt=""><span>ಕರುನಾಡ ಕೈಗನ್ನಡಿ</span></div>
     <div id="card"><div id="cardInner"></div></div>
+    <div id="hook"><div id="hookText"></div><div id="hookSub"></div></div>
     <div id="cap"></div>
     <div id="credit"></div>
   </div>
@@ -81,6 +90,22 @@ function render(t) {
     cardKey = c.text + q(sc) + q(op);
   } else { card.style.opacity = 0; }
 
+  // hook screen at the start: punches in, sub-line follows, fades out
+  const h = D.hook, hk = document.getElementById('hook');
+  let hookKey = '-';
+  if (h && t >= h.start && t < h.end) {
+    const ht = document.getElementById('hookText'), hs = document.getElementById('hookSub');
+    if (ht.textContent !== h.text) ht.textContent = h.text;
+    if (hs.textContent !== (h.sub || '')) hs.textContent = h.sub || '';
+    hs.style.display = h.sub ? 'block' : 'none';
+    const a = t - h.start;
+    const sc = a < 0.2 ? 0.55 + 0.6 * (a / 0.2) : (a < 0.34 ? 1.15 - 0.15 * ((a - 0.2) / 0.14) : 1);
+    const op = Math.min(clamp(a / 0.1, 0, 1), clamp((h.end - t) / 0.3, 0, 1));
+    hk.style.transform = 'scale(' + q(sc) + ')'; hk.style.opacity = q(op);
+    hs.style.opacity = q(clamp((a - 0.45) / 0.25, 0, 1));
+    hookKey = q(sc) + '/' + q(op) + '/' + q(clamp((a - 0.45) / 0.25, 0, 1));
+  } else { hk.style.opacity = 0; }
+
   // captions
   const k = pick(D.caps, t);
   const cap = document.getElementById('cap');
@@ -98,7 +123,7 @@ function render(t) {
   document.getElementById('end').style.opacity = q(e);
   document.getElementById('main').style.opacity = q(1 - e);
 
-  return [Math.round(clamp(t / D.endStart, 0, 1) * 540), cardKey, capText, crt, q(e)].join('|');
+  return [Math.round(clamp(t / D.endStart, 0, 1) * 540), cardKey, hookKey, capText, crt, q(e)].join('|');
 }
 </script>
 </body>
