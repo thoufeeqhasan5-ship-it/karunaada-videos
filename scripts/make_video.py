@@ -319,81 +319,112 @@ _depth_model = None
 _depth_cache = {}
 
 
-def depth_map(still, test=False):
-    """How near each pixel is (0 = far, 1 = near), from Depth Anything V2 Small (Apache-2.0). None if unavailable."""
-    import numpy as np
-    key = str(still)
+def depth_map(img_bgr, key, test=False):
+    """How near each pixel is (0 = far, 1 = near), same size as the image. Depth Anything V2 Small (Apache-2.0)."""
+    import numpy as np, cv2
     if key in _depth_cache:
         return _depth_cache[key]
+    h, w = img_bgr.shape[:2]
     d = None
-    if test:     # synthetic depth for offline tests: lower and centre of the frame are nearer
-        yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
-        d = 0.6 * (yy / H) + 0.4 * np.exp(-(((xx - W / 2) / (W * 0.25)) ** 2 + ((yy - H * 0.55) / (H * 0.2)) ** 2))
+    if test:     # synthetic depth for offline tests: lower part and centre are nearer
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        d = 0.6 * (yy / h) + 0.4 * np.exp(-(((xx - w / 2) / (w * 0.2)) ** 2 + ((yy - h * 0.6) / (h * 0.2)) ** 2))
     else:
         global _depth_model
-        try:
-            from PIL import Image
-            if _depth_model is None:
-                from transformers import pipeline
-                _depth_model = pipeline("depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf", device=-1)
-                log("depth model loaded")
-            out = _depth_model(Image.open(still).convert("RGB"))
-            d = np.asarray(out["depth"].convert("L").resize((W, H)), dtype=np.float32)
-        except Exception as e:
-            log(f"depth unavailable ({str(e)[:160]}), using plain camera moves")
-            _depth_model = False if _depth_model is None else _depth_model
-    if d is not None:
-        import cv2
+        if _depth_model is not False:
+            try:
+                from PIL import Image
+                if _depth_model is None:
+                    from transformers import pipeline
+                    _depth_model = pipeline("depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf", device=-1)
+                    log("depth model loaded")
+                out = _depth_model(Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)))
+                d = np.asarray(out["depth"].convert("L").resize((w, h)), dtype=np.float32)
+            except Exception as e:
+                log(f"depth unavailable ({str(e)[:160]}), camera moves without 3D depth")
+                _depth_model = False
+    if d is None:
+        d = np.zeros((h, w), np.float32)
+    else:
         lo, hi = np.percentile(d, 2), np.percentile(d, 98)
         d = np.clip((d - lo) / max(1e-6, hi - lo), 0, 1)
-        d = cv2.GaussianBlur(d, (0, 0), 9)          # soft edges = no tearing around objects
+        d = cv2.GaussianBlur(d, (0, 0), max(3, w / 160))    # soft edges = no tearing around objects
     _depth_cache[key] = d
     return d
 
 
-def parallax_clip(still, seconds, idx, dst, depth):
-    """A smooth 'camera move' over a photo: near things move more than far things."""
+def camera_shot(photo, seconds, idx, dst, test=False, fast=False):
+    """Turn a photo into a filmed-looking shot: the photo fills the screen and a 'camera' travels across it
+    (pan / push-in / rise), with 3D parallax - near things move more than the background."""
     import numpy as np, cv2
-    img = cv2.imread(str(still))
-    n = max(1, int(round(seconds * FPS)))
-    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
-    cx, cy = W / 2.0, H / 2.0
-    D = depth.astype(np.float32)
-    mode = idx % 4
-    proc = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}",
-                             "-r", str(FPS), "-i", "-", "-vf", "format=yuv420p", "-c:v", "libx264", "-preset", "veryfast",
-                             "-crf", "20", str(dst)], stdin=subprocess.PIPE)
-    for f in range(n):
-        p = f / max(1, n - 1)
-        e = p * p * (3 - 2 * p)                       # ease in/out, like a real camera operator
-        px = py = 0.0
-        if mode == 0:      # slow push-in (dolly): near objects grow faster
-            zoom, k = 1.06 + 0.05 * e, 0.06 * e
-        elif mode == 1:    # sideways glide (truck): near objects slide past
-            zoom, k, px = 1.10, 0.0, (-1 + 2 * e) * 0.028 * W
-        elif mode == 2:    # rise (crane up)
-            zoom, k, py = 1.10, 0.0, (1 - 2 * e) * 0.022 * H
-        else:              # slow pull-back
-            zoom, k = 1.11 - 0.05 * e, 0.06 * (1 - e)
-        s = zoom * (1.0 + k * D)
-        mapx = cx + (xx - cx) / s - px * D
-        mapy = cy + (yy - cy) / s - py * D
-        frame = cv2.remap(img, mapx, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-        proc.stdin.write(frame.tobytes())
-    proc.stdin.close()
-    if proc.wait() != 0:
-        raise RuntimeError("ffmpeg failed while writing the camera move")
-
-
-def camera_shot(still, seconds, idx, dst, test=False):
-    """Parallax camera move if depth is available, otherwise the classic slow zoom."""
     try:
-        d = depth_map(still, test)
-        if d is not None:
-            parallax_clip(still, seconds, idx, dst, d)
-            return
+        src = cv2.imread(str(photo))
+        if src is None:
+            raise RuntimeError("cannot read photo")
+        # canvas: photo scaled to fill the 9:16 frame with room to move (wide photos stay wide for panning)
+        sc = max(W * 1.18 / src.shape[1], H * 1.18 / src.shape[0])
+        cw, ch = int(src.shape[1] * sc), int(src.shape[0] * sc)
+        if cw > W * 3.2:                                     # very wide panoramas: keep the middle part
+            x0 = (cw - int(W * 3.2)) // 2
+        else:
+            x0 = 0
+        canvas = cv2.resize(src, (cw, ch), interpolation=cv2.INTER_AREA if sc < 1 else cv2.INTER_CUBIC)
+        if x0:
+            canvas = np.ascontiguousarray(canvas[:, x0:x0 + int(W * 3.2)])
+        ch, cw = canvas.shape[:2]
+        D = depth_map(canvas, f"{photo}", test)
+
+        n = max(1, int(round(seconds * FPS)))
+        yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+        ox, oy = xx - W / 2.0, yy - H / 2.0
+        wide = cw > W * 1.6
+        room_x, room_y = (cw - W) / 2.0, (ch - H) / 2.0       # how far the view can travel from the centre
+        if wide:
+            mode = ["pan_r", "pan_l", "pan_r_in"][idx % 3]
+        else:
+            mode = ["push", "rise", "push_side", "pull"][idx % 4]
+        amp = 1.6 if fast else 1.0
+        proc = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}",
+                                 "-r", str(FPS), "-i", "-", "-vf", "format=yuv420p", "-c:v", "libx264", "-preset", "veryfast",
+                                 "-crf", "19", str(dst)], stdin=subprocess.PIPE)
+        for f in range(n):
+            p = f / max(1, n - 1)
+            e = p * p * (3 - 2 * p)                          # ease in/out, like a camera operator
+            zoom, cx, cy, par_x, par_y, dz = 1.0, cw / 2.0, ch / 2.0, 0.0, 0.0, 0.0
+            if mode in ("pan_r", "pan_l", "pan_r_in"):       # travel across a wide photo
+                dirn = -1 if mode == "pan_l" else 1
+                cx = cw / 2.0 + dirn * (-1 + 2 * e) * room_x * 0.92
+                zoom = 1.0 + (0.10 * e if mode == "pan_r_in" else 0.0)
+                par_x = dirn * (-1 + 2 * e) * 0.07 * W * amp     # near objects slide past faster
+            elif mode == "push":                             # dolly in: near objects grow faster
+                zoom, dz = 1.0 + 0.16 * e * amp, 0.18 * e * amp
+            elif mode == "rise":                             # crane up
+                cy = ch / 2.0 + (1 - 2 * e) * room_y * 0.9
+                par_y = (1 - 2 * e) * 0.06 * H * amp
+                zoom = 1.04
+            elif mode == "push_side":                        # push in while drifting sideways
+                zoom, dz = 1.0 + 0.12 * e * amp, 0.12 * e * amp
+                cx = cw / 2.0 + (-1 + 2 * e) * room_x * 0.8
+                par_x = (-1 + 2 * e) * 0.05 * W * amp
+            else:                                            # pull back: reveal
+                zoom, dz = 1.18 - 0.16 * e, 0.18 * (1 - e)
+            # where each output pixel looks in the canvas (without depth), then add the depth effect
+            bx = cx + ox / zoom
+            by = cy + oy / zoom
+            Dv = cv2.remap(D, bx, by, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+            s3 = 1.0 + dz * Dv
+            mapx = cx + ox / (zoom * s3) - par_x * Dv / zoom
+            mapy = cy + oy / (zoom * s3) - par_y * Dv / zoom
+            frame = cv2.remap(canvas, mapx, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+            proc.stdin.write(frame.tobytes())
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("ffmpeg failed while writing the camera move")
+        return
     except Exception as e:
         log(f"camera move failed ({str(e)[:160]}), using a slow zoom")
+    still = Path(str(dst) + ".jpg")
+    compose_still(photo, still)
     kenburns(still, seconds, idx, dst)
 
 
@@ -522,10 +553,8 @@ def main():
             for m in range(n_cl):
                 p = pics[m % len(pics)]
                 seg = round(intro / n_cl, 3) if m < n_cl - 1 else round(intro - t_cl, 3)
-                still = WORK / f"intro_still_{m:02d}.jpg"
-                compose_still(p["path"], still)
                 clip = WORK / f"intro_{m:02d}.mp4"
-                camera_shot(still, seg, m, clip, a.test)     # fast 3D camera move (slow zoom if no depth)
+                camera_shot(p["path"], seg, m, clip, a.test, fast=True)
                 clips.append(clip)
                 credits.append({"text": f"Photo: {p['artist']} · {p['licence']} · Wikimedia Commons" if not a.test else "Photo: test",
                                 "start": round(t_cl, 3), "end": round(t_cl + seg, 3)})
@@ -546,10 +575,8 @@ def main():
         p = photos[k] if k < len(photos) else None
         if p is None:
             p = next((x for x in photos if x), None)
-        still = WORK / f"still_{j:02d}.jpg"
-        compose_still(p["path"], still)
         clip = WORK / f"clip_{j:02d}.mp4"
-        camera_shot(still, en - st, j, clip, a.test)
+        camera_shot(p["path"], en - st, j, clip, a.test)
         clips.append(clip)
         credits.append({"text": f"Photo: {p['artist']} · {p['licence']} · Wikimedia Commons" if not a.test else "Photo: test",
                         "start": round(st, 3), "end": round(en, 3)})
